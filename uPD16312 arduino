@@ -1,0 +1,404 @@
+/****************************************************/
+/* This is only one example of code structure       */
+/* OFFCOURSE this code can be optimized, but        */
+/* the idea is let it so simple to be easy catch    */
+/* where can do changes and look to the results     */
+/****************************************************/
+//set your clock speed
+//#define F_CPU 16000000UL
+//these are the include files. They are outside the project folder
+//#include <avr/io.h>
+//#include <iom1284p.h>
+#include <util/delay.h>
+//#include <avr/interrupt.h>
+#define VFD_in 7// If 0 write LCD, if 1 read of LCD
+#define VFD_clk 8 // if 0 is a command, if 1 is a data0
+#define VFD_stb 9 // Must be pulsed to LCD fetch data of bus
+
+unsigned char secs;
+
+unsigned int segments[] ={
+  // Here I'm forced to use the "0" as 10, because the 7 segments sart in "1"
+  // This table is inverted
+  // This not respect the table for 7 segm like "abcdefgh"  // 
+      0b00110001,  0b00010011, //0
+      0b00010000,  0b00000001, //1 
+      0b11010001,  0b01010010, //2
+      0b11010001,  0b01010001, //3
+      0b11110000,  0b01000001, //4
+      0b11100001,  0b01010001, //5
+      0b11100001,  0b01010011, //6
+      0b00010001,  0b00000001, //7
+      0b11110001,  0b01010011, //8
+      0b11110001,  0b01000001, //9
+      0b11110001,  0b01000011, //A
+      0b11100000,  0b01010011, //b 
+      0b00100001,  0b00010010, //C
+      0b11010000,  0b01010011, //d
+      0b11100001,  0b01010010, //E
+      0b11100001,  0b01000010, //F
+      0b00000000,  0b00000000, // empty display
+      0b00000000,  0b00000000, //
+      0b00000000,  0b00000000, //
+      0b00000000,  0b00000000, //
+      0b00000000,  0b00000000, //
+      0b00000000,  0b00000000  //
+  };
+unsigned long grids[] ={
+  //font data
+  //  The grid on this display count from left to right  // 
+    0b01000000, //  Grid 1
+    0b00100000, //  Grid 2
+    0b00010000, //  Grid 3
+    0b00001000, //  Grid 4
+    0b00000100, //  Grid 5
+    0b00000010, //  Grid 6
+    0b00000001, //  Grid 7
+  };
+/*****************************************************************/
+void setup() {
+// put your setup code here, to run once:
+// initialize digital pin LED_BUILTIN as an output.
+  pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(VFD_in, OUTPUT);
+  pinMode(VFD_clk, OUTPUT);
+  pinMode(VFD_stb, OUTPUT); // Must be pulsed to LCD fetch data of bus
+  Serial.begin(115200);
+  
+  /*CS12  CS11 CS10 DESCRIPTION
+  0        0     0  Timer/Counter1 Disabled 
+  0        0     1  No Prescaling
+  0        1     0  Clock / 8
+  0        1     1  Clock / 64
+  1        0     0  Clock / 256
+  1        0     1  Clock / 1024
+  1        1     0  External clock source on T1 pin, Clock on Falling edge
+  1        1     1  External clock source on T1 pin, Clock on rising edge
+ */
+  // initialize timer1 
+  cli();           // disable all interrupts
+  // initialize timer1 
+  //noInterrupts();           // disable all interrupts
+  TCCR1A = 0;
+  TCCR1B = 0;// This initialisations is very important, to have sure the trigger take place!!!
+  TCNT1  = 0;
+  // Use 62499 to generate a cycle of 1 sex 2 X 0.5 Secs (16MHz / (2*256*(1+62449) = 0.5
+  OCR1A = 62498;            // compare match register 16MHz/256/2Hz
+  TCCR1B |= (1 << WGM12);   // CTC mode
+  TCCR1B |= ((1 << CS12) | (0 << CS11) | (0 << CS10));    // 256 prescaler 
+  TIMSK1 |= (1 << OCIE1A);  // enable timer compare interrupt
+  
+// Note: this counts is done to a Arduino 1 with Atmega 328... Is possible you need adjust
+// a little the value 62499 upper or lower if the clock have a delay or advnce on hours.
+   
+CLKPR=(0x80);
+//Set PORT
+DDRD = 0xFF;  // IMPORTANT: from pin 0 to 7 is port D, from pin 8 to 13 is port B
+PORTD=0x00;
+DDRB =0xFF;
+PORTB =0x00;
+pt6312_init();
+//test_VFD();
+//clear_VFD();
+//only here I active the enable of interrupts to allow run the test of VFD
+//interrupts();             // enable all interrupts
+sei();
+}
+void pt6312_init(void){
+  delayMicroseconds(200); //power_up delay
+  // Note: Allways the first byte in the input data after the STB go to LOW is interpret as command!!!
+  // Configure VFD display (grids)
+  cmd_with_stb(0b00000011);// cmd1 7 grids 15 segm
+  delayMicroseconds(1);
+  // Write to memory display, increment address, normal operation
+  cmd_with_stb(0b01000000);//(BIN(01000000));
+  delayMicroseconds(1);
+  // Address 00H - 15H ( total of 11*2Bytes=176 Bits)
+  cmd_with_stb(0b11000000);//(BIN(01100110)); 
+  delayMicroseconds(1);
+  // set DIMM/PWM to value
+  cmd_with_stb((0b10001000) | 7);//0 min - 7 max  )(0b01010000)
+  delayMicroseconds(1);
+}
+void cmd_without_stb(unsigned char a){
+  // send without stb
+  unsigned char transmit = 7; //define our transmit pin
+  unsigned char data = 170; //value to transmit, binary 10101010
+  unsigned char mask = 1; //our bitmask
+  
+  data=a;
+  //This don't send the strobe signal, to be used in burst data send
+   for (mask = 00000001; mask>0; mask <<= 1) { //iterate through bit mask
+     digitalWrite(VFD_clk, LOW);
+     if (data & mask){ // if bitwise AND resolves to true
+        digitalWrite(VFD_in, HIGH);
+     }
+     else{ //if bitwise and resolves to false
+       digitalWrite(VFD_in, LOW);
+     }
+    delayMicroseconds(5);
+    digitalWrite(VFD_clk, HIGH);
+    delayMicroseconds(5);
+   }
+   //digitalWrite(VFD_clk, LOW);
+}
+void cmd_with_stb(unsigned char a){
+  // send with stb
+  unsigned char transmit = 7; //define our transmit pin
+  unsigned char data = 170; //value to transmit, binary 10101010
+  unsigned char mask = 1; //our bitmask
+  
+  data=a;
+  
+  //This send the strobe signal
+  //Note: The first byte input at in after the STB go LOW is interpreted as a command!!!
+  digitalWrite(VFD_stb, LOW);
+  delayMicroseconds(1);
+           for (mask = 00000001; mask>0; mask <<= 1) { //iterate through bit mask
+             digitalWrite(VFD_clk, LOW);
+             delayMicroseconds(1);
+                   if (data & mask){ // if bitwise AND resolves to true
+                      digitalWrite(VFD_in, HIGH);
+                   }
+                   else{ //if bitwise and resolves to false
+                     digitalWrite(VFD_in, LOW);
+                   }
+            digitalWrite(VFD_clk, HIGH);
+            delayMicroseconds(1);
+           }
+   digitalWrite(VFD_stb, HIGH);
+   delayMicroseconds(1);
+}
+void test_VFD(void){
+  /* 
+  Here do a test for all segments of 6 grids
+  each grid is controlled by a group of 2 bytes
+  by these reason I'm send a burst of 2 bytes of
+  data. The cycle for do a increment of 3 bytes on 
+  the variable "i" on each test cycle of FOR.
+  */
+  // to test 7 grids is 7*3=21, the 8 gird result in 8*3=24.
+ 
+  clear_VFD();
+      
+      digitalWrite(VFD_stb, LOW);
+      delayMicroseconds(1);
+      cmd_with_stb(0b00000011); // cmd 1 // 7 Grids & 15 Segments
+      cmd_with_stb(0b01000000); // cmd 2 //Normal operation; Set pulse as 1/16
+      
+        digitalWrite(VFD_stb, LOW);
+        delayMicroseconds(1);
+        cmd_without_stb((0b11000000)); //cmd 3 wich define the start address (00H to 15H)
+        
+         for (int i = 0; i < 7 ; i++){ // test base to 16 segm and 6 grids
+         cmd_without_stb(0b11111111); // Data to fill table 5*16 = 80 bits
+         cmd_without_stb(0b11111111); // Data to fill table 5*16 = 80 bits
+         }
+ 
+      cmd_with_stb((0b10001000) | 7); //cmd 4
+      digitalWrite(VFD_stb, HIGH);
+      delay(1);
+      delay(200);  
+}
+void test_VFD_chkGrids(void){
+  /* 
+  Here do a test for all segments of 5 grids
+  each grid is controlled by a group of 2 bytes
+  by these reason I'm send a burst of 2 bytes of
+  data. The cycle for do a increment of 3 bytes on 
+  the variable "i" on each test cycle of FOR.
+  */
+  // to test 6 grids is 6*3=18, the 8 grid result in 8*3=24.
+ 
+  clear_VFD();
+      
+      digitalWrite(VFD_stb, LOW);
+      delayMicroseconds(1);
+      cmd_with_stb(0b00000011); // cmd 1 // 6 Grids & 15 Segments
+      cmd_with_stb(0b01000000); // cmd 2 //Normal operation; Set pulse as 1/16
+      
+        digitalWrite(VFD_stb, LOW);
+        delayMicroseconds(1);
+        cmd_without_stb((0b11000000)); //cmd 3 wich define the start address (00H to 15H)
+             for (int i = 0; i < 7 ; i++){ // test base to 15 segm and 7 grids
+             cmd_without_stb(0b11111111); // Data to fill table 5*16 = 80 bits
+             cmd_without_stb(0b11111111); // Data to fill table 5*16 = 80 bits
+             
+             }
+          digitalWrite(VFD_stb, HIGH);
+          delayMicroseconds(1);
+      cmd_with_stb((0b10001000) | 7); //cmd 4
+      
+        delay(1);
+        delay(100);
+}
+void test_VFD_grid(void){    
+      digitalWrite(VFD_stb, LOW);
+      delayMicroseconds(5);
+      cmd_with_stb(0b00000011); // cmd 1 // 7 Grids & 15 Segments
+      cmd_with_stb(0b01000000); // cmd 2 //Normal operation; Set pulse as 1/16
+      //
+      cmd_with_stb((0b11000000)); //cmd 3 wich define the start address (00H to 15H)
+      for (int i = 0; i < 14 ; i=i+2){ // test base to 15 segm and 7 grids
+        digitalWrite(VFD_stb, LOW);
+        delayMicroseconds(5);
+        cmd_without_stb((0b11000000) | i);
+        delayMicroseconds(5);
+        Serial.println(i, HEX);
+             cmd_without_stb(0b11111111); // Data to fill table 6*16 = 96 bits
+             cmd_without_stb(0b01111111); // Data to fill table 6*16 = 96 bits
+             digitalWrite(VFD_stb, HIGH);
+             delayMicroseconds(5);
+             cmd_with_stb((0b10001000) | 7); //cmd 4
+             delayMicroseconds(5);
+             delay(300);
+             digitalWrite(VFD_stb, LOW);
+             delayMicroseconds(5);
+             cmd_without_stb((0b11000000) | i);
+             delayMicroseconds(5);
+             cmd_without_stb(0b00000000); // Data to fill table 6*16 = 96 bits
+             cmd_without_stb(0b00000000); // Data to fill table 6*16 = 96 bits
+             digitalWrite(VFD_stb, HIGH);
+             delayMicroseconds(5);
+             cmd_with_stb((0b10001000) | 7); //cmd 4
+             delayMicroseconds(5);
+             delay(300);
+      }
+}
+void numbers(void){    
+      digitalWrite(VFD_stb, LOW);
+      delayMicroseconds(5);
+      cmd_with_stb(0b00000011); // cmd 1 // 7 Grids & 15 Segments
+      cmd_with_stb(0b01000000); // cmd 2 //Normal operation; Set pulse as 1/16
+      //
+      cmd_with_stb((0b11000000)); //cmd 3 wich define the start address (00H to 15H)
+      for (int s = 0; s < 32 ; s=s+2){
+              for (int i = 0; i < 14 ; i=i+2){ // test base to 15 segm and 7 grids
+                digitalWrite(VFD_stb, LOW);
+                delayMicroseconds(5);
+                cmd_without_stb((0b11000000) | i);
+                delayMicroseconds(5);
+                Serial.println(i, HEX);
+                     cmd_without_stb( segments[s]);   //
+                     cmd_without_stb( segments[s+1]); // 
+                     digitalWrite(VFD_stb, HIGH);
+                     delayMicroseconds(5);
+                     cmd_with_stb((0b10001000) | 7); //cmd 4
+                     delayMicroseconds(5);
+                     delay(500);
+                     digitalWrite(VFD_stb, LOW);
+                     delayMicroseconds(5);
+                           if ((s!=0x0C)and(s!=0x1A)){
+                            s=s+2;
+                           }
+                     cmd_without_stb((0b11000000) | i);
+                     delayMicroseconds(5);
+                     cmd_without_stb(0b00000000); // 
+                     cmd_without_stb(0b00000000); // 
+                     digitalWrite(VFD_stb, HIGH);
+                     delayMicroseconds(5);
+                     cmd_with_stb((0b10001000) | 7); //cmd 4
+                     delayMicroseconds(5);
+                     delay(200);
+              }
+      }
+}
+void wr_HI(void){    
+      digitalWrite(VFD_stb, LOW);
+      delayMicroseconds(5);
+      cmd_with_stb(0b00000011); // cmd 1 // 7 Grids & 15 Segments
+      cmd_with_stb(0b01000000); // cmd 2 //Normal operation; Set pulse as 1/16
+      //
+      cmd_with_stb((0b11000000)); //cmd 3 wich define the start address (00H to 15H)
+        digitalWrite(VFD_stb, LOW);
+        delayMicroseconds(5);
+        cmd_without_stb(0b11001010);
+        delayMicroseconds(5);
+             cmd_without_stb(0b00000010); // I
+             cmd_without_stb(0b01000000); // 
+             //
+             cmd_without_stb(0b11110000); // H
+             cmd_without_stb(0b01000011); // 
+             
+             digitalWrite(VFD_stb, HIGH);
+             delayMicroseconds(5);
+             cmd_with_stb((0b10001000) | 7); //cmd 4
+             delayMicroseconds(5);
+             delay(4000);
+             digitalWrite(VFD_stb, LOW);
+             delayMicroseconds(5);
+}
+void wr_FOLKS(void){    
+      digitalWrite(VFD_stb, LOW);
+      delayMicroseconds(5);
+      cmd_with_stb(0b00000011); // cmd 1 // 7 Grids & 15 Segments
+      cmd_with_stb(0b01000000); // cmd 2 //Normal operation; Set pulse as 1/16
+      //
+      cmd_with_stb((0b11000000)); //cmd 3 wich define the start address (00H to 15H)
+        digitalWrite(VFD_stb, LOW);
+        delayMicroseconds(5);
+        cmd_without_stb(0b11000100);
+        delayMicroseconds(5);
+             cmd_without_stb(0b11100001); // S
+             cmd_without_stb(0b01010001); // 
+             //
+             cmd_without_stb(0b10101000); // K
+             cmd_without_stb(0b01001010); //
+             //
+             cmd_without_stb(0b00100000); // L
+             cmd_without_stb(0b00010010); // 
+             //
+             cmd_without_stb(0b00110001); // O
+             cmd_without_stb(0b00010011); // 
+             //
+             cmd_without_stb(0b11100001); // F
+             cmd_without_stb(0b01000010); // 
+             //     
+             digitalWrite(VFD_stb, HIGH);
+             delayMicroseconds(5);
+             cmd_with_stb((0b10001000) | 7); //cmd 4
+             delayMicroseconds(5);
+             delay(1500);
+             digitalWrite(VFD_stb, LOW);
+             delayMicroseconds(5);
+}
+void clear_VFD(void){
+  /*
+  Here I clean all registers 
+  Could be done only on the number of grid
+  to be more fast. The 12 * 2 bytes = 24 registers
+  */
+      for (int n=0; n < 21; n++){  // important be 10, if not, bright the half of wells./this on the VFD of 6 grids)
+        cmd_with_stb(0b00000011); //       cmd 1 // 7 Grids & 15 Segments
+        cmd_with_stb(0b01000000); //       cmd 2 //Normal operation; Set pulse as 1/16
+        digitalWrite(VFD_stb, LOW);
+        delayMicroseconds(1);
+            cmd_without_stb((0b11000000) | n); // cmd 3 //wich define the start address (00H to 15H)
+            cmd_without_stb(0b00000000); // Data to fill table of 6 grids * 15 segm = 80 bits on the table
+            //
+            //cmd_with_stb((0b10001000) | 7); //cmd 4
+            digitalWrite(VFD_stb, HIGH);
+            delayMicroseconds(100);
+     }
+}
+/*****************************************************************/
+void loop() {
+  // You can comment untill while cycle to avoid the test running.
+   test_VFD(); // All go to ON
+   delay(1500);
+   test_VFD_grid(); // All go to ON and after go to OFF
+   delay(200);
+   clear_VFD(); // Clear all VFD
+   numbers(); // Run the presentation hexadecimal symbols.
+   delay(1000);
+   wr_HI();  // Write message "HI", I send first the I because need write from grid 6 to grid 0! You can revert te counter offcourse!
+   delay(700);
+   clear_VFD(); //Clear all VFD
+   wr_FOLKS(); // Write message "FOLKS", I send first the S because need write from grid 6 to grid 0!
+   delay(1500);
+}
+ISR(TIMER1_COMPA_vect)   {  //This is the interrupt request
+                            // https://sites.google.com/site/qeewiki/books/avr-guide/timers-on-the-atmega328
+      secs++;
+      digitalWrite(13, !digitalRead(13));
+}
